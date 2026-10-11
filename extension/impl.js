@@ -345,6 +345,7 @@ export default class ToggleTopBarImpl {
                                 // Pop Shell's primary_display_ready requires (area.height !== work_area.height)
                                 return new Rect([geom.x, geom.y, geom.width, geom.height - 1]);
                             }
+                            return new Rect([geom.x, geom.y, geom.width, geom.height]);
                         }
                         return new Rect([geom.x, geom.y + panelHeight, geom.width, geom.height - panelHeight]);
                     }
