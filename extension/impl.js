@@ -18,6 +18,8 @@ export default class ToggleTopBarImpl {
         this._hoverTimeoutId = null;
         this._restoreTimeoutId = null;
         this._workspaceState = null;
+        this._windowMaximizeStates = new Map();
+        this._maximizeWindowCreatedId = null;
 
         this._popExtClass = null;
         this._popExt = null;
@@ -54,6 +56,8 @@ export default class ToggleTopBarImpl {
 
         // Reset any frozen actor translations from past runs
         this._resetWindowTranslations();
+        this._trackMaximizeWindows();
+        this._syncMaximizedWindowsWithPanel();
 
         // Register custom keyboard shortcut
         this._bindShortcut();
@@ -144,6 +148,8 @@ export default class ToggleTopBarImpl {
 
         this._workspaceState?.disable();
         this._workspaceState = null;
+        this._restoreRememberedMaximizeStates();
+        this._untrackMaximizeWindows();
 
         // Clean up translation_y on all windows
         this._resetWindowTranslations();
@@ -187,6 +193,80 @@ export default class ToggleTopBarImpl {
         }
     }
 
+    _trackMaximizeWindows() {
+        const manager = global.display.get_workspace_manager();
+        const trackWorkspace = workspace => {
+            for (const win of workspace.list_windows()) this._trackMaximizeWindow(win);
+        };
+
+        for (let i = 0; i < manager.get_n_workspaces(); i++)
+            trackWorkspace(manager.get_workspace_by_index(i));
+
+        this._maximizeWindowCreatedId = global.display.connect('window-created', (_display, win) =>
+            this._trackMaximizeWindow(win));
+    }
+
+    _trackMaximizeWindow(win) {
+        if (this._windowMaximizeStates.has(win)) return;
+
+        const state = { maximized: win.is_maximized(), applying: false, signals: [] };
+        const update = () => {
+            if (!state.applying) state.maximized = win.is_maximized();
+        };
+        state.signals.push(
+            win.connect('notify::maximized-horizontally', update),
+            win.connect('notify::maximized-vertically', update),
+            win.connect('unmanaged', () => this._untrackMaximizeWindow(win))
+        );
+        this._windowMaximizeStates.set(win, state);
+    }
+
+    _untrackMaximizeWindow(win) {
+        const state = this._windowMaximizeStates.get(win);
+        if (!state) return;
+        this._windowMaximizeStates.delete(win);
+        for (const id of state.signals) {
+            try { win.disconnect(id); } catch (_) {}
+        }
+    }
+
+    _untrackMaximizeWindows() {
+        if (this._maximizeWindowCreatedId) {
+            global.display.disconnect(this._maximizeWindowCreatedId);
+            this._maximizeWindowCreatedId = null;
+        }
+        for (const win of this._windowMaximizeStates.keys()) this._untrackMaximizeWindow(win);
+    }
+
+    _restoreRememberedMaximizeStates() {
+        for (const [win, state] of this._windowMaximizeStates) {
+            if (!state.maximized || win.is_maximized()) continue;
+            state.applying = true;
+            win.maximize(Meta.MaximizeFlags.BOTH);
+            state.applying = false;
+        }
+    }
+
+    _syncMaximizedWindowsWithPanel() {
+        const workspace = global.display.get_workspace_manager().get_active_workspace();
+        if (!workspace) return;
+
+        for (const win of workspace.list_windows()) {
+            const state = this._windowMaximizeStates.get(win);
+            if (!state) continue;
+
+            const shouldMaximize = state.maximized && this._isPanelHidden;
+            if (shouldMaximize === win.is_maximized()) continue;
+
+            state.applying = true;
+            if (shouldMaximize)
+                win.maximize(Meta.MaximizeFlags.BOTH);
+            else
+                win.unmaximize(Meta.MaximizeFlags.BOTH);
+            state.applying = false;
+        }
+    }
+
     /* -------------------------------------------------------------
      *  Keybinding
      * ------------------------------------------------------------- */
@@ -224,6 +304,7 @@ export default class ToggleTopBarImpl {
 
         this._isPanelHidden = true;
         this._workspaceState?.setHidden(true);
+        this._syncMaximizedWindowsWithPanel();
         this._isHoverOverlay = false;
         this._isAnimating = true;
 
@@ -266,6 +347,7 @@ export default class ToggleTopBarImpl {
         if (affectStruts) {
             this._isPanelHidden = false;
             this._workspaceState?.setHidden(false);
+            this._syncMaximizedWindowsWithPanel();
         }
         this._isHoverOverlay = false;
         this._isAnimating = true;
