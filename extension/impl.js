@@ -3,7 +3,6 @@ import Shell from 'gi://Shell';
 import Clutter from 'gi://Clutter';
 import GLib from 'gi://GLib';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
-import WorkspaceState from './workspace-state.js';
 
 export default class ToggleTopBarImpl {
     constructor(extension) {
@@ -17,7 +16,8 @@ export default class ToggleTopBarImpl {
         this._isAnimating = false;
         this._hoverTimeoutId = null;
         this._restoreTimeoutId = null;
-        this._workspaceState = null;
+        this._workspaceManager = null;
+        this._workspaceChangedId = null;
         this._windowMaximizeStates = new Map();
         this._pendingWindowAnimations = new Map();
         this._maximizeWindowCreatedId = null;
@@ -51,13 +51,6 @@ export default class ToggleTopBarImpl {
         Main.layoutManager.untrackChrome(this._panelBox);
         Main.layoutManager.trackChrome(this._panelBox, { affectsStruts: true });
 
-        this._workspaceState = new WorkspaceState(hidden => {
-            if (hidden === this._isPanelHidden) return;
-            if (hidden) this._hidePanel({ affectStruts: false, syncWorkspace: false, animateWindows: true });
-            else this._restorePanel({ affectStruts: false, syncWorkspace: false, animateWindows: true });
-        });
-        this._workspaceState.enable();
-
         // Reset any frozen actor translations from past runs
         this._resetWindowTranslations();
         this._trackMaximizeWindows();
@@ -72,21 +65,23 @@ export default class ToggleTopBarImpl {
         // Overview integration: reveal top bar in Overview, hide when returning
         this._overviewShowingId = Main.overview.connect('showing', () => {
             if (this._isPanelHidden) {
-                this._restorePanel({ animate: false, affectStruts: false, syncWorkspace: false, setHiddenState: false });
+                this._restorePanel({ animate: false, affectStruts: false, setHiddenState: false });
             }
         });
 
         this._overviewHidingId = Main.overview.connect('hiding', () => {
             if (this._isPanelHidden) {
-                this._workspaceState?.sync();
-                if (this._isPanelHidden) {
-                    this._hidePanel({ animate: false, affectStruts: false, syncWorkspace: false });
-                }
+                this._hidePanel({ animate: false, affectStruts: false });
             }
         });
 
         // Hook into Pop Shell class prototype
         await this._hookPopShell();
+
+        this._workspaceManager = global.display.get_workspace_manager();
+        this._workspaceChangedId = this._workspaceManager.connect('active-workspace-changed', () => {
+            this._syncMaximizedWindowsWithPanel({ animate: true, skipPopTiled: true });
+        });
 
         // Setup mouse hover detection at the top screen edge
         this._setupEdgeTrigger();
@@ -150,8 +145,11 @@ export default class ToggleTopBarImpl {
         // Clean up hover edge triggers and timers
         this._destroyEdgeTrigger();
 
-        this._workspaceState?.disable();
-        this._workspaceState = null;
+        if (this._workspaceChangedId && this._workspaceManager) {
+            this._workspaceManager.disconnect(this._workspaceChangedId);
+            this._workspaceChangedId = null;
+        }
+        this._workspaceManager = null;
         this._restoreRememberedMaximizeStates();
         this._untrackMaximizeWindows();
 
@@ -308,11 +306,22 @@ export default class ToggleTopBarImpl {
         return GLib.SOURCE_REMOVE;
     }
 
-    _syncMaximizedWindowsWithPanel({ animate = false } = {}) {
+    _isPopShellTiled(win) {
+        if (!this._popExt?.get_window || !this._popExt.auto_tiler?.attached) return false;
+        try {
+            const popWin = this._popExt.get_window(win);
+            return Boolean(popWin && this._popExt.auto_tiler.attached.contains(popWin.entity));
+        } catch (_) {
+            return false;
+        }
+    }
+
+    _syncMaximizedWindowsWithPanel({ animate = false, skipPopTiled = false } = {}) {
         const workspace = global.display.get_workspace_manager().get_active_workspace();
         if (!workspace) return;
 
         for (const win of workspace.list_windows()) {
+            if (skipPopTiled && this._isPopShellTiled(win)) continue;
             const state = this._windowMaximizeStates.get(win);
             if (!state) continue;
 
@@ -377,8 +386,6 @@ export default class ToggleTopBarImpl {
         this.logger.log(`togglePanel called: current isPanelHidden=${this._isPanelHidden}`);
         if (this._isPanelHidden) {
             this._restorePanel();
-        } else if (this._workspaceState?.activeWorkspaceIsEmpty()) {
-            this._workspaceState.setHidden(false);
         } else {
             this._hidePanel();
         }
@@ -387,12 +394,10 @@ export default class ToggleTopBarImpl {
     /* -------------------------------------------------------------
      *  Panel Visibility & Work Area Struts
      * ------------------------------------------------------------- */
-    _hidePanel({ animate = true, affectStruts = true, syncWorkspace = true, animateWindows = true } = {}) {
+    _hidePanel({ animate = true, affectStruts = true, animateWindows = true } = {}) {
         if (!this._panelBox) return;
 
         this._isPanelHidden = true;
-        if (syncWorkspace) this._workspaceState?.setHidden(true);
-        // Workspace changes still sync each window's maximize state, without changing struts.
         this._syncMaximizedWindowsWithPanel({ animate: animate && animateWindows });
         this._isHoverOverlay = false;
         this._isAnimating = true;
@@ -437,12 +442,10 @@ export default class ToggleTopBarImpl {
         this._isAnimating = false;
     }
 
-    _restorePanel({ animate = true, affectStruts = true, syncWorkspace = true, setHiddenState = true, animateWindows = true } = {}) {
+    _restorePanel({ animate = true, affectStruts = true, setHiddenState = true, animateWindows = true } = {}) {
         if (!this._panelBox) return;
 
         if (setHiddenState) this._isPanelHidden = false;
-        if (syncWorkspace) this._workspaceState?.setHidden(false);
-        // Keep per-window maximize state in sync when a workspace changes visually.
         this._syncMaximizedWindowsWithPanel({ animate: animate && animateWindows });
         this._isHoverOverlay = false;
         this._isAnimating = true;
