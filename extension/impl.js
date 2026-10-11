@@ -3,6 +3,7 @@ import Shell from 'gi://Shell';
 import Clutter from 'gi://Clutter';
 import GLib from 'gi://GLib';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
+import WorkspaceState from './workspace-state.js';
 
 export default class ToggleTopBarImpl {
     constructor(extension) {
@@ -16,6 +17,7 @@ export default class ToggleTopBarImpl {
         this._isAnimating = false;
         this._hoverTimeoutId = null;
         this._restoreTimeoutId = null;
+        this._workspaceState = null;
 
         this._popExtClass = null;
         this._popExt = null;
@@ -39,6 +41,13 @@ export default class ToggleTopBarImpl {
         this._isHoverOverlay = false;
         this._isAnimating = false;
 
+        this._workspaceState = new WorkspaceState(hidden => {
+            if (hidden === this._isPanelHidden) return;
+            if (hidden) this._hidePanel(true);
+            else this._restorePanel(true, true);
+        });
+        this._workspaceState.enable();
+
         // Reset any frozen actor translations from past runs
         this._resetWindowTranslations();
 
@@ -57,7 +66,10 @@ export default class ToggleTopBarImpl {
 
         this._overviewHidingId = Main.overview.connect('hiding', () => {
             if (this._isPanelHidden) {
-                this._hidePanel(false);
+                this._workspaceState?.sync();
+                if (this._isPanelHidden) {
+                    this._hidePanel(false);
+                }
             }
         });
 
@@ -126,6 +138,9 @@ export default class ToggleTopBarImpl {
         // Clean up hover edge triggers and timers
         this._destroyEdgeTrigger();
 
+        this._workspaceState?.disable();
+        this._workspaceState = null;
+
         // Clean up translation_y on all windows
         this._resetWindowTranslations();
 
@@ -187,6 +202,8 @@ export default class ToggleTopBarImpl {
         this.logger.log(`togglePanel called: current isPanelHidden=${this._isPanelHidden}`);
         if (this._isPanelHidden) {
             this._restorePanel(true, true);
+        } else if (this._workspaceState?.activeWorkspaceIsEmpty()) {
+            this._workspaceState.setHidden(false);
         } else {
             this._hidePanel(true);
         }
@@ -199,6 +216,7 @@ export default class ToggleTopBarImpl {
         if (!this._panelBox) return;
 
         this._isPanelHidden = true;
+        this._workspaceState?.setHidden(true);
         this._isHoverOverlay = false;
         this._isAnimating = true;
 
@@ -211,33 +229,6 @@ export default class ToggleTopBarImpl {
         const duration = animate ? 220 : 0;
         const panelHeight = this._getPanelHeight();
         const mode = Clutter.AnimationMode.EASE_OUT_QUAD;
-
-        // Reset any stale translations before measuring
-        const primaryIdx = Main.layoutManager.primaryMonitor?.index ?? 0;
-        const workspace = global.display.get_workspace_manager().get_active_workspace();
-        const windows = workspace ? workspace.list_windows().filter(w => {
-            return !w.is_override_redirect() &&
-                   !w.is_attached_dialog() &&
-                   !w.minimized &&
-                   w.get_window_type() === Meta.WindowType.NORMAL &&
-                   w.get_monitor() === primaryIdx;
-        }) : [];
-
-        for (const win of windows) {
-            const actor = win.get_compositor_private();
-            if (actor) {
-                actor.remove_all_transitions();
-                actor.translation_y = 0;
-            }
-        }
-
-        // Capture current window positions before retiling
-        const oldRects = new Map();
-        if (animate) {
-            for (const win of windows) {
-                oldRects.set(win, win.get_frame_rect());
-            }
-        }
 
         // Untrack panelBox struts so Mutter updates work areas to full monitor
         Main.layoutManager.untrackChrome(this._panelBox);
@@ -262,9 +253,7 @@ export default class ToggleTopBarImpl {
             this._isAnimating = false;
         }
 
-        // Retile immediately in lockstep with the panel animation
-        this._retileAll();
-        // Let Pop Shell process Mutter's work-area change right away (no waiting for the panel animation)
+        Main.layoutManager._queueUpdateRegions?.();
         this._isAnimating = false;
     }
 
@@ -273,6 +262,7 @@ export default class ToggleTopBarImpl {
 
         if (affectStruts) {
             this._isPanelHidden = false;
+            this._workspaceState?.setHidden(false);
         }
         this._isHoverOverlay = false;
         this._isAnimating = true;
@@ -286,33 +276,6 @@ export default class ToggleTopBarImpl {
         const duration = animate ? 220 : 0;
         const panelHeight = this._getPanelHeight();
         const mode = Clutter.AnimationMode.EASE_OUT_QUAD;
-
-        // Reset any stale translations before measuring
-        const primaryIdx = Main.layoutManager.primaryMonitor?.index ?? 0;
-        const workspace = global.display.get_workspace_manager().get_active_workspace();
-        const windows = workspace ? workspace.list_windows().filter(w => {
-            return !w.is_override_redirect() &&
-                   !w.is_attached_dialog() &&
-                   !w.minimized &&
-                   w.get_window_type() === Meta.WindowType.NORMAL &&
-                   w.get_monitor() === primaryIdx;
-        }) : [];
-
-        for (const win of windows) {
-            const actor = win.get_compositor_private();
-            if (actor) {
-                actor.remove_all_transitions();
-                actor.translation_y = 0;
-            }
-        }
-
-        // Capture current window positions before retiling
-        const oldRects = new Map();
-        if (animate && affectStruts) {
-            for (const win of windows) {
-                oldRects.set(win, win.get_frame_rect());
-            }
-        }
 
         this._panelBox.show();
         this._panelBox.opacity = 255;
@@ -345,62 +308,7 @@ export default class ToggleTopBarImpl {
             }
         }
 
-        if (affectStruts) {
-            this._retileAll();
-            this._isAnimating = false;
-        }
-    }
-
-    _animateWindows(windows, oldRects, duration) {
-        const mode = Clutter.AnimationMode.EASE_OUT_QUAD;
-        for (const win of windows) {
-            const oldRect = oldRects.get(win);
-            if (!oldRect) continue;
-
-            const newRect = win.get_frame_rect();
-            const dy = oldRect.y - newRect.y;
-            this.logger.log(`_animateWindows: win="${win.get_title()}", old=[${oldRect.x}, ${oldRect.y}, ${oldRect.width}, ${oldRect.height}], new=[${newRect.x}, ${newRect.y}, ${newRect.width}, ${newRect.height}], dy=${dy}`);
-
-            const actor = win.get_compositor_private();
-            if (actor) {
-                actor.remove_all_transitions();
-                if (Math.abs(dy) > 0) {
-                    actor.translation_y = dy;
-                    actor.ease({
-                        translation_y: 0,
-                        duration,
-                        mode,
-                        onComplete: () => {
-                            actor.translation_y = 0;
-                        },
-                    });
-                } else {
-                    actor.translation_y = 0;
-                }
-            }
-
-            if (this._popExt?.get_window) {
-                try {
-                    const popWin = this._popExt.get_window(win);
-                    if (popWin?.border) {
-                        popWin.border.remove_all_transitions();
-                        if (Math.abs(dy) > 0) {
-                            popWin.border.translation_y = dy;
-                            popWin.border.ease({
-                                translation_y: 0,
-                                duration,
-                                mode,
-                                onComplete: () => {
-                                    popWin.border.translation_y = 0;
-                                },
-                            });
-                        } else {
-                            popWin.border.translation_y = 0;
-                        }
-                    }
-                } catch (_) {}
-            }
-        }
+        if (affectStruts) this._isAnimating = false;
     }
 
     /* -------------------------------------------------------------
@@ -437,13 +345,8 @@ export default class ToggleTopBarImpl {
                                 // Pop Shell's primary_display_ready requires (area.height !== work_area.height)
                                 return new Rect([geom.x, geom.y, geom.width, geom.height - 1]);
                             }
-                            return new Rect([geom.x, geom.y, geom.width, geom.height]);
-                        } else {
-                            if (stack.includes('primary_display_ready')) {
-                                return new Rect([geom.x, geom.y + panelHeight, geom.width, geom.height - panelHeight]);
-                            }
-                            return new Rect([geom.x, geom.y + panelHeight, geom.width, geom.height - panelHeight]);
                         }
+                        return new Rect([geom.x, geom.y + panelHeight, geom.width, geom.height - panelHeight]);
                     }
                 }
 
@@ -486,101 +389,6 @@ export default class ToggleTopBarImpl {
                 this._origUpdateDisplay = null;
             }
             this._popExtClass = null;
-        }
-    }
-
-    _retileAll() {
-        const primaryMon = Main.layoutManager.primaryMonitor;
-        const primaryIdx = primaryMon ? primaryMon.index : 0;
-        const geom = global.display.get_monitor_geometry(primaryIdx);
-        const panelHeight = this._getPanelHeight();
-        this.logger.log(`_retileAll: isPanelHidden=${this._isPanelHidden}, panelHeight=${panelHeight}`);
-
-        // Queue Mutter layout update
-        if (Main.layoutManager._queueUpdateRegions) {
-            Main.layoutManager._queueUpdateRegions();
-        }
-
-        // Retile Pop Shell trees
-        if (this._popExt) {
-            try {
-                if (this._popExt.workareas_update !== null) {
-                    GLib.source_remove(this._popExt.workareas_update);
-                    this._popExt.workareas_update = null;
-                }
-
-                // Trigger Pop Shell's native display configuration update
-                this._popExt.update_display_configuration(true);
-
-                if (this._popExt.auto_tiler) {
-                    for (const fork of this._popExt.auto_tiler.forest.forks.values()) {
-                        if (!fork.is_toplevel || fork.monitor !== primaryIdx) continue;
-
-                        const Rect = fork.area.constructor;
-                        const area = this._isPanelHidden
-                            ? new Rect([geom.x, geom.y, geom.width, geom.height])
-                            : new Rect([geom.x, geom.y + panelHeight, geom.width, geom.height - panelHeight]);
-
-                        fork.smart_gapped = false;
-                        fork.set_area(area.clone());
-                        this._popExt.auto_tiler.update_toplevel(
-                            this._popExt,
-                            fork,
-                            fork.monitor,
-                            this._popExt.settings.smart_gaps()
-                        );
-                    }
-                }
-
-                // Synchronously flush all pending window movements queued by Pop Shell
-                // so windows are moved immediately and Pop Shell's idle queue won't cancel our transitions!
-                if (this._popExt.movements) {
-                    for (const [entity, movement] of Array.from(this._popExt.movements.iter())) {
-                        const popWin = this._popExt.windows.get(entity);
-                        if (!popWin) continue;
-                        this._popExt.movements.remove(entity);
-                        const { x, y, width, height } = movement;
-                        this.logger.log(`_retileAll: flush popWin="${popWin.name(this._popExt)}", target=[${x}, ${y}, ${width}, ${height}]`);
-                        popWin.meta.get_compositor_private()?.remove_all_transitions();
-                        popWin.meta.move_resize_frame(true, x, y, width, height);
-                        popWin.meta.move_frame(true, x, y);
-                        if (popWin.meta.appears_focused) {
-                            try { popWin.update_border_layout?.(); } catch (_) {}
-                        }
-                    }
-                }
-
-                return;
-            } catch (err) {
-                this.logger.error(`Error re-tiling Pop Shell: ${err}`);
-            }
-        }
-
-        // Fallback for non-pop-shell windows
-        this._fallbackResizeWindows(this._isPanelHidden, geom);
-    }
-
-    _fallbackResizeWindows(hidden, geom) {
-        if (!geom) return;
-        const panelHeight = this._getPanelHeight();
-        const workspace = global.display.get_workspace_manager().get_active_workspace();
-        if (!workspace) return;
-
-        const windows = workspace.list_windows().filter(w => {
-            return !w.is_override_redirect() &&
-                   !w.is_attached_dialog() &&
-                   !w.minimized &&
-                   w.get_window_type() === Meta.WindowType.NORMAL &&
-                   w.get_monitor() === (Main.layoutManager.primaryMonitor?.index ?? 0);
-        });
-
-        for (const win of windows) {
-            const frame = win.get_frame_rect();
-            if (hidden) {
-                win.move_resize_frame(true, frame.x, geom.y, frame.width, geom.height);
-            } else {
-                win.move_resize_frame(true, frame.x, geom.y + panelHeight, frame.width, geom.height - panelHeight);
-            }
         }
     }
 
