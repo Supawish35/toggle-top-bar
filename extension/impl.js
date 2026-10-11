@@ -527,7 +527,7 @@ export default class ToggleTopBarImpl {
                             this._popExt,
                             fork,
                             fork.monitor,
-                            false
+                            this._popExt.settings.smart_gaps()
                         );
                     }
                 }
@@ -541,6 +541,7 @@ export default class ToggleTopBarImpl {
                         this._popExt.movements.remove(entity);
                         const { x, y, width, height } = movement;
                         this.logger.log(`_retileAll: flush popWin="${popWin.name(this._popExt)}", target=[${x}, ${y}, ${width}, ${height}]`);
+                        popWin.meta.get_compositor_private()?.remove_all_transitions();
                         popWin.meta.move_resize_frame(true, x, y, width, height);
                         popWin.meta.move_frame(true, x, y);
                         if (popWin.meta.appears_focused) {
