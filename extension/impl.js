@@ -265,10 +265,7 @@ export default class ToggleTopBarImpl {
         // Retile immediately in lockstep with the panel animation
         this._retileAll();
 
-        // Animate the windows in smooth synchrony
-        if (animate) {
-            this._animateWindows(windows, oldRects, duration);
-        }
+        // Windows snap immediately (no slide) so their bottoms don't lag behind
     }
 
     _restorePanel(animate = true, affectStruts = true) {
@@ -350,10 +347,6 @@ export default class ToggleTopBarImpl {
 
         if (affectStruts) {
             this._retileAll();
-
-            if (animate) {
-                this._animateWindows(windows, oldRects, duration);
-            }
         }
     }
 
