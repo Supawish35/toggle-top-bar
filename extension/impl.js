@@ -264,8 +264,8 @@ export default class ToggleTopBarImpl {
 
         // Retile immediately in lockstep with the panel animation
         this._retileAll();
-
-        // Windows snap immediately (no slide) so their bottoms don't lag behind
+        // Let Pop Shell process Mutter's work-area change right away (no waiting for the panel animation)
+        this._isAnimating = false;
     }
 
     _restorePanel(animate = true, affectStruts = true) {
@@ -347,6 +347,7 @@ export default class ToggleTopBarImpl {
 
         if (affectStruts) {
             this._retileAll();
+            this._isAnimating = false;
         }
     }
 
