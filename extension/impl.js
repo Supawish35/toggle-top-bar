@@ -41,6 +41,10 @@ export default class ToggleTopBarImpl {
         this._isHoverOverlay = false;
         this._isAnimating = false;
 
+        // Keep the work area fixed so visibility changes only animate the bar.
+        Main.layoutManager.untrackChrome(this._panelBox);
+        Main.layoutManager.trackChrome(this._panelBox, { affectsStruts: false });
+
         this._workspaceState = new WorkspaceState(hidden => {
             if (hidden === this._isPanelHidden) return;
             if (hidden) this._hidePanel(true);
@@ -144,11 +148,14 @@ export default class ToggleTopBarImpl {
         // Clean up translation_y on all windows
         this._resetWindowTranslations();
 
-        // Restore top bar if currently hidden
+        // Restore the shell's normal top bar reservation on disable.
         if (this._isPanelHidden) {
             this._restorePanel(false, true);
             this._isPanelHidden = false;
         }
+        Main.layoutManager.untrackChrome(this._panelBox);
+        Main.layoutManager.trackChrome(this._panelBox, { affectsStruts: true });
+        Main.layoutManager._queueUpdateRegions?.();
 
         // Unhook Pop Shell
         this._unhookPopShell();
@@ -230,10 +237,6 @@ export default class ToggleTopBarImpl {
         const panelHeight = this._getPanelHeight();
         const mode = Clutter.AnimationMode.EASE_OUT_QUAD;
 
-        // Untrack panelBox struts so Mutter updates work areas to full monitor
-        Main.layoutManager.untrackChrome(this._panelBox);
-        Main.layoutManager.trackChrome(this._panelBox, { affectsStruts: false });
-
         if (animate) {
             this._panelBox.remove_all_transitions();
             this._panelBox.ease({
@@ -279,11 +282,6 @@ export default class ToggleTopBarImpl {
 
         this._panelBox.show();
         this._panelBox.opacity = 255;
-
-        if (affectStruts) {
-            Main.layoutManager.untrackChrome(this._panelBox);
-            Main.layoutManager.trackChrome(this._panelBox, { affectsStruts: true });
-        }
 
         if (animate) {
             this._panelBox.remove_all_transitions();
@@ -338,16 +336,12 @@ export default class ToggleTopBarImpl {
                     const geom = global.display.get_monitor_geometry(monitor);
                     if (geom) {
                         const Rect = this.monitor_area(monitor).constructor;
-                        const panelHeight = self._getPanelHeight();
 
-                        if (self._isPanelHidden) {
-                            if (stack.includes('primary_display_ready')) {
-                                // Pop Shell's primary_display_ready requires (area.height !== work_area.height)
-                                return new Rect([geom.x, geom.y, geom.width, geom.height - 1]);
-                            }
-                            return new Rect([geom.x, geom.y, geom.width, geom.height]);
+                        if (stack.includes('primary_display_ready')) {
+                            // Pop Shell's primary_display_ready requires (area.height !== work_area.height)
+                            return new Rect([geom.x, geom.y, geom.width, geom.height - 1]);
                         }
-                        return new Rect([geom.x, geom.y + panelHeight, geom.width, geom.height - panelHeight]);
+                        return new Rect([geom.x, geom.y, geom.width, geom.height]);
                     }
                 }
 
