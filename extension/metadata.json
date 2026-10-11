@@ -1,0 +1,7 @@
+{
+  "name": "Toggle Top Bar",
+  "description": "Toggles GNOME top bar visibility with a keyboard shortcut, expanding pop-shell tiled windows to full screen height.",
+  "uuid": "toggle-top-bar@supaw.dev",
+  "shell-version": [ "50" ],
+  "settings-schema": "org.gnome.shell.extensions.toggle-top-bar"
+}

@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist gettext-domain="toggle-top-bar">
+  <schema id="org.gnome.shell.extensions.toggle-top-bar" path="/org/gnome/shell/extensions/toggle-top-bar/">
+    <key name="toggle-shortcut" type="as">
+      <default>['&lt;Alt&gt;f']</default>
+      <summary>Shortcut to toggle top bar visibility</summary>
+      <description>Keyboard shortcut to hide or show the top bar and reclaim workspace area.</description>
+    </key>
+    <key name="mouse-hover-reveal" type="b">
+      <default>true</default>
+      <summary>Auto-reveal top bar on mouse hover</summary>
+      <description>Temporarily show the top bar as an overlay when the mouse reaches the top edge.</description>
+    </key>
+    <key name="hover-delay" type="i">
+      <default>250</default>
+      <summary>Hover reveal delay (ms)</summary>
+      <description>Milliseconds the mouse must hover at the top edge before the top bar reveals.</description>
+    </key>
+  </schema>
+</schemalist>
