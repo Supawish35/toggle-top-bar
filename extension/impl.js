@@ -527,7 +527,7 @@ export default class ToggleTopBarImpl {
                             this._popExt,
                             fork,
                             fork.monitor,
-                            this._popExt.settings.smart_gaps()
+                            false
                         );
                     }
                 }
