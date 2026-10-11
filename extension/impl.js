@@ -437,11 +437,13 @@ export default class ToggleTopBarImpl {
                                 // Pop Shell's primary_display_ready requires (area.height !== work_area.height)
                                 return new Rect([geom.x, geom.y, geom.width, geom.height - 1]);
                             }
+                            return new Rect([geom.x, geom.y, geom.width, geom.height]);
+                        } else {
+                            if (stack.includes('primary_display_ready')) {
+                                return new Rect([geom.x, geom.y + panelHeight, geom.width, geom.height - panelHeight]);
+                            }
+                            return new Rect([geom.x, geom.y + panelHeight, geom.width, geom.height - panelHeight]);
                         }
-
-                        // Keep Pop Shell's tiling area fixed while the panel hides. Mutter's
-                        // work area still expands, but existing windows keep their geometry.
-                        return new Rect([geom.x, geom.y + panelHeight, geom.width, geom.height - panelHeight]);
                     }
                 }
 
@@ -515,7 +517,9 @@ export default class ToggleTopBarImpl {
                         if (!fork.is_toplevel || fork.monitor !== primaryIdx) continue;
 
                         const Rect = fork.area.constructor;
-                        const area = new Rect([geom.x, geom.y + panelHeight, geom.width, geom.height - panelHeight]);
+                        const area = this._isPanelHidden
+                            ? new Rect([geom.x, geom.y, geom.width, geom.height])
+                            : new Rect([geom.x, geom.y + panelHeight, geom.width, geom.height - panelHeight]);
 
                         fork.smart_gapped = false;
                         fork.set_area(area.clone());
@@ -552,6 +556,32 @@ export default class ToggleTopBarImpl {
             }
         }
 
+        // Fallback for non-pop-shell windows
+        this._fallbackResizeWindows(this._isPanelHidden, geom);
+    }
+
+    _fallbackResizeWindows(hidden, geom) {
+        if (!geom) return;
+        const panelHeight = this._getPanelHeight();
+        const workspace = global.display.get_workspace_manager().get_active_workspace();
+        if (!workspace) return;
+
+        const windows = workspace.list_windows().filter(w => {
+            return !w.is_override_redirect() &&
+                   !w.is_attached_dialog() &&
+                   !w.minimized &&
+                   w.get_window_type() === Meta.WindowType.NORMAL &&
+                   w.get_monitor() === (Main.layoutManager.primaryMonitor?.index ?? 0);
+        });
+
+        for (const win of windows) {
+            const frame = win.get_frame_rect();
+            if (hidden) {
+                win.move_resize_frame(true, frame.x, geom.y, frame.width, geom.height);
+            } else {
+                win.move_resize_frame(true, frame.x, geom.y + panelHeight, frame.width, geom.height - panelHeight);
+            }
+        }
     }
 
     /* -------------------------------------------------------------
