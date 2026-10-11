@@ -43,9 +43,9 @@ export default class ToggleTopBarImpl {
         this._isHoverOverlay = false;
         this._isAnimating = false;
 
-        // Keep the work area fixed so visibility changes only animate the bar.
+        // The visible panel reserves its normal work area.
         Main.layoutManager.untrackChrome(this._panelBox);
-        Main.layoutManager.trackChrome(this._panelBox, { affectsStruts: false });
+        Main.layoutManager.trackChrome(this._panelBox, { affectsStruts: true });
 
         this._workspaceState = new WorkspaceState(hidden => {
             if (hidden === this._isPanelHidden) return;
@@ -318,6 +318,9 @@ export default class ToggleTopBarImpl {
         const panelHeight = this._getPanelHeight();
         const mode = Clutter.AnimationMode.EASE_OUT_QUAD;
 
+        Main.layoutManager.untrackChrome(this._panelBox);
+        Main.layoutManager.trackChrome(this._panelBox, { affectsStruts: false });
+
         if (animate) {
             this._panelBox.remove_all_transitions();
             this._panelBox.ease({
@@ -364,6 +367,11 @@ export default class ToggleTopBarImpl {
 
         this._panelBox.show();
         this._panelBox.opacity = 255;
+
+        if (affectStruts) {
+            Main.layoutManager.untrackChrome(this._panelBox);
+            Main.layoutManager.trackChrome(this._panelBox, { affectsStruts: true });
+        }
 
         if (animate) {
             this._panelBox.remove_all_transitions();
@@ -423,7 +431,11 @@ export default class ToggleTopBarImpl {
                             // Pop Shell's primary_display_ready requires (area.height !== work_area.height)
                             return new Rect([geom.x, geom.y, geom.width, geom.height - 1]);
                         }
-                        return new Rect([geom.x, geom.y, geom.width, geom.height]);
+                        if (self._isPanelHidden)
+                            return new Rect([geom.x, geom.y, geom.width, geom.height]);
+
+                        const panelHeight = self._getPanelHeight();
+                        return new Rect([geom.x, geom.y + panelHeight, geom.width, geom.height - panelHeight]);
                     }
                 }
 
