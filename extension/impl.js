@@ -40,6 +40,9 @@ export default class ToggleTopBarImpl {
         this._panelBox = Main.layoutManager.panelBox;
         this._panelHeight = this._panelBox?.height || 38;
         this._isPanelHidden = false;
+        // Keep the tiling area fixed across workspace changes to avoid retiling.
+        // The bar may temporarily overlay windows or leave an empty top strip.
+        this._reservePanelSpace = true;
         this._isHoverOverlay = false;
         this._isAnimating = false;
 
@@ -49,15 +52,15 @@ export default class ToggleTopBarImpl {
 
         this._workspaceState = new WorkspaceState(hidden => {
             if (hidden === this._isPanelHidden) return;
-            if (hidden) this._hidePanel(true);
-            else this._restorePanel(true, true);
+            if (hidden) this._hidePanel({ affectStruts: false, syncWorkspace: false, animateWindows: true });
+            else this._restorePanel({ affectStruts: false, syncWorkspace: false, animateWindows: true });
         });
         this._workspaceState.enable();
 
         // Reset any frozen actor translations from past runs
         this._resetWindowTranslations();
         this._trackMaximizeWindows();
-        this._syncMaximizedWindowsWithPanel();
+        this._syncMaximizedWindowsWithPanel({ animate: false });
 
         // Register custom keyboard shortcut
         this._bindShortcut();
@@ -68,7 +71,7 @@ export default class ToggleTopBarImpl {
         // Overview integration: reveal top bar in Overview, hide when returning
         this._overviewShowingId = Main.overview.connect('showing', () => {
             if (this._isPanelHidden) {
-                this._restorePanel(false, false);
+                this._restorePanel({ animate: false, affectStruts: false, syncWorkspace: false, setHiddenState: false });
             }
         });
 
@@ -76,7 +79,7 @@ export default class ToggleTopBarImpl {
             if (this._isPanelHidden) {
                 this._workspaceState?.sync();
                 if (this._isPanelHidden) {
-                    this._hidePanel(false);
+                    this._hidePanel({ animate: false, affectStruts: false, syncWorkspace: false });
                 }
             }
         });
@@ -156,10 +159,11 @@ export default class ToggleTopBarImpl {
 
         // Restore the shell's normal top bar reservation on disable.
         if (this._isPanelHidden) {
-            this._restorePanel(false, true);
+            this._restorePanel({ animate: false });
             this._isPanelHidden = false;
         }
         Main.layoutManager.untrackChrome(this._panelBox);
+        this._reservePanelSpace = true;
         Main.layoutManager.trackChrome(this._panelBox, { affectsStruts: true });
         Main.layoutManager._queueUpdateRegions?.();
 
@@ -173,22 +177,29 @@ export default class ToggleTopBarImpl {
     }
 
     _resetWindowTranslations() {
-        const workspace = global.display.get_workspace_manager().get_active_workspace();
-        if (!workspace) return;
-        for (const win of workspace.list_windows()) {
-            const actor = win.get_compositor_private();
-            if (actor) {
-                actor.remove_all_transitions();
-                actor.translation_y = 0;
-            }
-            if (this._popExt?.get_window) {
-                try {
-                    const popWin = this._popExt.get_window(win);
-                    if (popWin?.border) {
-                        popWin.border.remove_all_transitions();
-                        popWin.border.translation_y = 0;
-                    }
-                } catch (_) {}
+        const manager = global.display.get_workspace_manager();
+        for (let i = 0; i < manager.get_n_workspaces(); i++) {
+            for (const win of manager.get_workspace_by_index(i).list_windows()) {
+                const actor = win.get_compositor_private();
+                if (actor) {
+                    actor.remove_all_transitions();
+                    actor.scale_x = 1;
+                    actor.scale_y = 1;
+                    actor.translation_x = 0;
+                    actor.translation_y = 0;
+                }
+                if (this._popExt?.get_window) {
+                    try {
+                        const popWin = this._popExt.get_window(win);
+                        if (popWin?.border) {
+                            popWin.border.remove_all_transitions();
+                            popWin.border.scale_x = 1;
+                            popWin.border.scale_y = 1;
+                            popWin.border.translation_x = 0;
+                            popWin.border.translation_y = 0;
+                        }
+                    } catch (_) {}
+                }
             }
         }
     }
@@ -247,7 +258,7 @@ export default class ToggleTopBarImpl {
         }
     }
 
-    _syncMaximizedWindowsWithPanel() {
+    _syncMaximizedWindowsWithPanel({ animate = false } = {}) {
         const workspace = global.display.get_workspace_manager().get_active_workspace();
         if (!workspace) return;
 
@@ -258,12 +269,36 @@ export default class ToggleTopBarImpl {
             const shouldMaximize = state.maximized && this._isPanelHidden;
             if (shouldMaximize === win.is_maximized()) continue;
 
+            const actor = win.get_compositor_private();
+            const oldRect = animate && actor ? win.get_frame_rect() : null;
+
             state.applying = true;
             if (shouldMaximize)
                 win.maximize(Meta.MaximizeFlags.BOTH);
             else
                 win.unmaximize(Meta.MaximizeFlags.BOTH);
             state.applying = false;
+
+            if (oldRect && actor) {
+                const newRect = win.get_frame_rect();
+                if (newRect.width > 0 && newRect.height > 0 &&
+                    (oldRect.width !== newRect.width || oldRect.height !== newRect.height ||
+                     oldRect.x !== newRect.x || oldRect.y !== newRect.y)) {
+                    actor.remove_all_transitions();
+                    actor.scale_x = oldRect.width / newRect.width;
+                    actor.scale_y = oldRect.height / newRect.height;
+                    actor.translation_x = oldRect.x + oldRect.width / 2 - newRect.x - newRect.width / 2;
+                    actor.translation_y = oldRect.y + oldRect.height / 2 - newRect.y - newRect.height / 2;
+                    actor.ease({
+                        scale_x: 1,
+                        scale_y: 1,
+                        translation_x: 0,
+                        translation_y: 0,
+                        duration: 220,
+                        mode: Clutter.AnimationMode.EASE_OUT_QUAD,
+                    });
+                }
+            }
         }
     }
 
@@ -288,28 +323,29 @@ export default class ToggleTopBarImpl {
     togglePanel() {
         this.logger.log(`togglePanel called: current isPanelHidden=${this._isPanelHidden}`);
         if (this._isPanelHidden) {
-            this._restorePanel(true, true);
+            this._restorePanel();
         } else if (this._workspaceState?.activeWorkspaceIsEmpty()) {
             this._workspaceState.setHidden(false);
         } else {
-            this._hidePanel(true);
+            this._hidePanel();
         }
     }
 
     /* -------------------------------------------------------------
      *  Panel Visibility & Work Area Struts
      * ------------------------------------------------------------- */
-    _hidePanel(animate = true) {
+    _hidePanel({ animate = true, affectStruts = true, syncWorkspace = true, animateWindows = true } = {}) {
         if (!this._panelBox) return;
 
         this._isPanelHidden = true;
-        this._workspaceState?.setHidden(true);
-        this._syncMaximizedWindowsWithPanel();
+        if (syncWorkspace) this._workspaceState?.setHidden(true);
+        this._syncMaximizedWindowsWithPanel({ animate: animate && animateWindows });
         this._isHoverOverlay = false;
         this._isAnimating = true;
 
-        // Cancel any pending workarea retry timeouts in Pop Shell
-        if (this._popExt && this._popExt.workareas_update !== null) {
+        // Only cancel the retry when changing the reserved work area. A workspace
+        // transition keeps the same area, so any pending retry remains valid.
+        if (affectStruts && this._popExt && this._popExt.workareas_update !== null) {
             GLib.source_remove(this._popExt.workareas_update);
             this._popExt.workareas_update = null;
         }
@@ -318,8 +354,11 @@ export default class ToggleTopBarImpl {
         const panelHeight = this._getPanelHeight();
         const mode = Clutter.AnimationMode.EASE_OUT_QUAD;
 
-        Main.layoutManager.untrackChrome(this._panelBox);
-        Main.layoutManager.trackChrome(this._panelBox, { affectsStruts: false });
+        if (affectStruts) {
+            this._reservePanelSpace = false;
+            Main.layoutManager.untrackChrome(this._panelBox);
+            Main.layoutManager.trackChrome(this._panelBox, { affectsStruts: false });
+        }
 
         if (animate) {
             this._panelBox.remove_all_transitions();
@@ -340,23 +379,22 @@ export default class ToggleTopBarImpl {
             this._isAnimating = false;
         }
 
-        Main.layoutManager._queueUpdateRegions?.();
+        if (affectStruts) Main.layoutManager._queueUpdateRegions?.();
         this._isAnimating = false;
     }
 
-    _restorePanel(animate = true, affectStruts = true) {
+    _restorePanel({ animate = true, affectStruts = true, syncWorkspace = true, setHiddenState = true, animateWindows = true } = {}) {
         if (!this._panelBox) return;
 
-        if (affectStruts) {
-            this._isPanelHidden = false;
-            this._workspaceState?.setHidden(false);
-            this._syncMaximizedWindowsWithPanel();
-        }
+        if (setHiddenState) this._isPanelHidden = false;
+        if (syncWorkspace) this._workspaceState?.setHidden(false);
+        this._syncMaximizedWindowsWithPanel({ animate: animate && animateWindows });
         this._isHoverOverlay = false;
         this._isAnimating = true;
 
-        // Cancel any pending workarea retry timeouts in Pop Shell
-        if (this._popExt && this._popExt.workareas_update !== null) {
+        // Keep pending retries when this is only a visual workspace transition;
+        // they still target the unchanged reserved work area.
+        if (affectStruts && this._popExt && this._popExt.workareas_update !== null) {
             GLib.source_remove(this._popExt.workareas_update);
             this._popExt.workareas_update = null;
         }
@@ -369,6 +407,7 @@ export default class ToggleTopBarImpl {
         this._panelBox.opacity = 255;
 
         if (affectStruts) {
+            this._reservePanelSpace = true;
             Main.layoutManager.untrackChrome(this._panelBox);
             Main.layoutManager.trackChrome(this._panelBox, { affectsStruts: true });
         }
@@ -431,7 +470,7 @@ export default class ToggleTopBarImpl {
                             // Pop Shell's primary_display_ready requires (area.height !== work_area.height)
                             return new Rect([geom.x, geom.y, geom.width, geom.height - 1]);
                         }
-                        if (self._isPanelHidden)
+                        if (!self._reservePanelSpace)
                             return new Rect([geom.x, geom.y, geom.width, geom.height]);
 
                         const panelHeight = self._getPanelHeight();
