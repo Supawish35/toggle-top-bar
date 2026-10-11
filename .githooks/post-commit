@@ -1,0 +1,16 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(git rev-parse --show-toplevel)
+source_dir="$repo_root/extension"
+data_home=${XDG_DATA_HOME:-"$HOME/.local/share"}
+target_dir="$data_home/gnome-shell/extensions/toggle-top-bar@supaw.dev"
+
+if [ -L "$target_dir" ]; then
+  printf 'Refusing to deploy through a symlink: %s\n' "$target_dir" >&2
+  exit 1
+fi
+
+glib-compile-schemas "$source_dir/schemas"
+mkdir -p "$target_dir"
+rsync -a --delete "$source_dir/" "$target_dir/"
