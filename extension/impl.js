@@ -19,6 +19,7 @@ export default class ToggleTopBarImpl {
         this._restoreTimeoutId = null;
         this._workspaceState = null;
         this._windowMaximizeStates = new Map();
+        this._pendingWindowAnimations = new Map();
         this._maximizeWindowCreatedId = null;
 
         this._popExtClass = null;
@@ -177,6 +178,7 @@ export default class ToggleTopBarImpl {
     }
 
     _resetWindowTranslations() {
+        for (const win of this._pendingWindowAnimations.keys()) this._cancelWindowAnimation(win);
         const manager = global.display.get_workspace_manager();
         for (let i = 0; i < manager.get_n_workspaces(); i++) {
             for (const win of manager.get_workspace_by_index(i).list_windows()) {
@@ -187,15 +189,13 @@ export default class ToggleTopBarImpl {
                     actor.scale_y = 1;
                     actor.translation_x = 0;
                     actor.translation_y = 0;
+                    actor.set_pivot_point(0, 0);
                 }
                 if (this._popExt?.get_window) {
                     try {
                         const popWin = this._popExt.get_window(win);
                         if (popWin?.border) {
                             popWin.border.remove_all_transitions();
-                            popWin.border.scale_x = 1;
-                            popWin.border.scale_y = 1;
-                            popWin.border.translation_x = 0;
                             popWin.border.translation_y = 0;
                         }
                     } catch (_) {}
@@ -234,6 +234,7 @@ export default class ToggleTopBarImpl {
 
     _untrackMaximizeWindow(win) {
         const state = this._windowMaximizeStates.get(win);
+        this._cancelWindowAnimation(win);
         if (!state) return;
         this._windowMaximizeStates.delete(win);
         for (const id of state.signals) {
@@ -258,6 +259,55 @@ export default class ToggleTopBarImpl {
         }
     }
 
+    _cancelWindowAnimation(win) {
+        const pending = this._pendingWindowAnimations.get(win);
+        if (!pending) return;
+        this._pendingWindowAnimations.delete(win);
+        for (const id of pending.signals) {
+            try { win.disconnect(id); } catch (_) {}
+        }
+        if (pending.timeoutId) {
+            GLib.source_remove(pending.timeoutId);
+            pending.timeoutId = null;
+        }
+    }
+
+    _startWindowAnimation(win, force = false) {
+        const pending = this._pendingWindowAnimations.get(win);
+        if (!pending) return GLib.SOURCE_REMOVE;
+
+        const actor = win.get_compositor_private();
+        if (!actor || actor.width <= 0 || actor.height <= 0) {
+            if (force) this._cancelWindowAnimation(win);
+            return GLib.SOURCE_REMOVE;
+        }
+        if (!force && actor.x === pending.x && actor.y === pending.y &&
+            actor.width === pending.width && actor.height === pending.height)
+            return GLib.SOURCE_CONTINUE;
+        this._cancelWindowAnimation(win);
+
+        const newX = actor.x;
+        const newY = actor.y;
+        const newWidth = actor.width;
+        const newHeight = actor.height;
+        actor.remove_all_transitions();
+        actor.set_pivot_point(0.5, 0.5);
+        actor.scale_x = pending.width / newWidth;
+        actor.scale_y = pending.height / newHeight;
+        actor.translation_x = pending.x + pending.width / 2 - newX - newWidth / 2;
+        actor.translation_y = pending.y + pending.height / 2 - newY - newHeight / 2;
+        actor.ease({
+            scale_x: 1,
+            scale_y: 1,
+            translation_x: 0,
+            translation_y: 0,
+            duration: 220,
+            mode: Clutter.AnimationMode.EASE_OUT_QUAD,
+            onComplete: () => actor.set_pivot_point(0, 0),
+        });
+        return GLib.SOURCE_REMOVE;
+    }
+
     _syncMaximizedWindowsWithPanel({ animate = false } = {}) {
         const workspace = global.display.get_workspace_manager().get_active_workspace();
         if (!workspace) return;
@@ -270,7 +320,30 @@ export default class ToggleTopBarImpl {
             if (shouldMaximize === win.is_maximized()) continue;
 
             const actor = win.get_compositor_private();
-            const oldRect = animate && actor ? win.get_frame_rect() : null;
+            if (animate && actor) {
+                this._cancelWindowAnimation(win);
+                actor.remove_all_transitions();
+            }
+            const oldActorRect = animate && actor ? {
+                x: actor.x,
+                y: actor.y,
+                width: actor.width,
+                height: actor.height,
+            } : null;
+
+            if (oldActorRect) {
+                const pending = { ...oldActorRect, signals: [], timeoutId: null };
+                this._pendingWindowAnimations.set(win, pending);
+                const start = () => this._startWindowAnimation(win);
+                pending.signals.push(win.connect('size-changed', start));
+                pending.signals.push(win.connect('position-changed', start));
+                pending.timeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 250, () => {
+                    const current = this._pendingWindowAnimations.get(win);
+                    if (current) current.timeoutId = null;
+                    this._startWindowAnimation(win, true);
+                    return GLib.SOURCE_REMOVE;
+                });
+            }
 
             state.applying = true;
             if (shouldMaximize)
@@ -279,26 +352,6 @@ export default class ToggleTopBarImpl {
                 win.unmaximize(Meta.MaximizeFlags.BOTH);
             state.applying = false;
 
-            if (oldRect && actor) {
-                const newRect = win.get_frame_rect();
-                if (newRect.width > 0 && newRect.height > 0 &&
-                    (oldRect.width !== newRect.width || oldRect.height !== newRect.height ||
-                     oldRect.x !== newRect.x || oldRect.y !== newRect.y)) {
-                    actor.remove_all_transitions();
-                    actor.scale_x = oldRect.width / newRect.width;
-                    actor.scale_y = oldRect.height / newRect.height;
-                    actor.translation_x = oldRect.x + oldRect.width / 2 - newRect.x - newRect.width / 2;
-                    actor.translation_y = oldRect.y + oldRect.height / 2 - newRect.y - newRect.height / 2;
-                    actor.ease({
-                        scale_x: 1,
-                        scale_y: 1,
-                        translation_x: 0,
-                        translation_y: 0,
-                        duration: 220,
-                        mode: Clutter.AnimationMode.EASE_OUT_QUAD,
-                    });
-                }
-            }
         }
     }
 
@@ -339,6 +392,7 @@ export default class ToggleTopBarImpl {
 
         this._isPanelHidden = true;
         if (syncWorkspace) this._workspaceState?.setHidden(true);
+        // Workspace changes still sync each window's maximize state, without changing struts.
         this._syncMaximizedWindowsWithPanel({ animate: animate && animateWindows });
         this._isHoverOverlay = false;
         this._isAnimating = true;
@@ -388,6 +442,7 @@ export default class ToggleTopBarImpl {
 
         if (setHiddenState) this._isPanelHidden = false;
         if (syncWorkspace) this._workspaceState?.setHidden(false);
+        // Keep per-window maximize state in sync when a workspace changes visually.
         this._syncMaximizedWindowsWithPanel({ animate: animate && animateWindows });
         this._isHoverOverlay = false;
         this._isAnimating = true;
