@@ -122,7 +122,7 @@ export default class ToggleTopBarImpl {
         this.logger.log('Extension enabled successfully.');
     }
 
-    async disable() {
+    disable() {
         this.logger.log('Disabling extension implementation...');
         if (this._shortcutChangedId) {
             this._settings.disconnect(this._shortcutChangedId);
@@ -358,7 +358,7 @@ export default class ToggleTopBarImpl {
             if (shouldMaximize)
                 win.maximize(Meta.MaximizeFlags.BOTH);
             else
-                win.unmaximize(Meta.MaximizeFlags.BOTH);
+                win.unmaximize();
             state.applying = false;
 
         }
@@ -501,7 +501,20 @@ export default class ToggleTopBarImpl {
      * ------------------------------------------------------------- */
     async _hookPopShell() {
         try {
-            const popModule = await import('file:///usr/share/gnome-shell/extensions/pop-shell@system76.com/extension.js');
+            let popUri = null;
+            const ext = Main.extensionManager?.lookup?.('pop-shell@system76.com');
+            if (ext?.dir) {
+                popUri = ext.dir.get_child('extension.js').get_uri();
+            } else {
+                const userPath = `${GLib.get_user_data_dir()}/gnome-shell/extensions/pop-shell@system76.com/extension.js`;
+                if (GLib.file_test(userPath, GLib.FileTest.EXISTS)) {
+                    popUri = `file://${userPath}`;
+                } else {
+                    popUri = 'file:///usr/share/gnome-shell/extensions/pop-shell@system76.com/extension.js';
+                }
+            }
+            this.logger.log(`Importing Pop Shell from ${popUri}`);
+            const popModule = await import(popUri);
             if (!popModule?.Ext) {
                 this.logger.warn('Pop Shell Ext class not found in module');
                 return;

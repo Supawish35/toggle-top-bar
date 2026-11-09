@@ -19,10 +19,10 @@ export default class ToggleTopBarExtension extends Extension {
         }
     }
 
-    async disable() {
+    disable() {
         try {
             if (this._impl) {
-                await this._impl.disable();
+                this._impl.disable();
                 this._impl = null;
             }
         } catch (err) {
