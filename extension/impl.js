@@ -16,6 +16,8 @@ export default class ToggleTopBarImpl {
         this._isAnimating = false;
         this._hoverTimeoutId = null;
         this._restoreTimeoutId = null;
+        this._hoverWatcherId = null;
+        this._lastHoverActivity = 0;
         this._workspaceManager = null;
         this._workspaceChangedId = null;
         this._windowMaximizeStates = new Map();
@@ -400,6 +402,11 @@ export default class ToggleTopBarImpl {
         this._isPanelHidden = true;
         this._syncMaximizedWindowsWithPanel({ animate: animate && animateWindows });
         this._isHoverOverlay = false;
+        if (this._hoverWatcherId) {
+            GLib.source_remove(this._hoverWatcherId);
+            this._hoverWatcherId = null;
+        }
+        this._edgeActor?.show();
         this._isAnimating = true;
 
         // Only cancel the retry when changing the reserved work area. A workspace
@@ -448,6 +455,11 @@ export default class ToggleTopBarImpl {
         if (setHiddenState) this._isPanelHidden = false;
         this._syncMaximizedWindowsWithPanel({ animate: animate && animateWindows });
         this._isHoverOverlay = false;
+        if (this._hoverWatcherId) {
+            GLib.source_remove(this._hoverWatcherId);
+            this._hoverWatcherId = null;
+        }
+        this._edgeActor?.show();
         this._isAnimating = true;
 
         // Keep pending retries when this is only a visual workspace transition;
@@ -618,43 +630,85 @@ export default class ToggleTopBarImpl {
             const delay = this._settings.get_int('hover-delay') || 250;
             if (this._hoverTimeoutId) {
                 GLib.source_remove(this._hoverTimeoutId);
+                this._hoverTimeoutId = null;
             }
 
             this._hoverTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, delay, () => {
                 this._hoverTimeoutId = null;
-                this._showHoverOverlay();
-                return GLib.SOURCE_REMOVE;
-            });
-
-            return Clutter.EVENT_PROPAGATE;
-        });
-
-        this._panelLeaveId = this._panelBox.connect('leave-event', () => {
-            if (!this._isPanelHidden || !this._isHoverOverlay) {
-                return Clutter.EVENT_PROPAGATE;
-            }
-
-            if (this._restoreTimeoutId) {
-                GLib.source_remove(this._restoreTimeoutId);
-            }
-
-            this._restoreTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 300, () => {
-                this._restoreTimeoutId = null;
-                if (this._isPanelHidden && this._isHoverOverlay) {
-                    if (Main.panel?.menuManager?.activeMenu) {
-                        return GLib.SOURCE_REMOVE;
+                // Verify pointer is still at the top edge or in panel area before revealing
+                const primaryMon = Main.layoutManager.primaryMonitor;
+                if (primaryMon) {
+                    const [, y] = global.get_pointer();
+                    if (y >= primaryMon.y && y <= primaryMon.y + this._getPanelHeight()) {
+                        this._showHoverOverlay();
                     }
-                    this._hideHoverOverlay();
                 }
                 return GLib.SOURCE_REMOVE;
             });
 
             return Clutter.EVENT_PROPAGATE;
         });
+
+        this._edgeActor.connect('leave-event', () => {
+            if (this._hoverTimeoutId) {
+                const primaryMon = Main.layoutManager.primaryMonitor;
+                if (primaryMon) {
+                    const [, y] = global.get_pointer();
+                    if (y > primaryMon.y + 5 || y < primaryMon.y) {
+                        GLib.source_remove(this._hoverTimeoutId);
+                        this._hoverTimeoutId = null;
+                    }
+                }
+            }
+            return Clutter.EVENT_PROPAGATE;
+        });
+    }
+
+    _isPointerInPanel() {
+        const primary = Main.layoutManager.primaryMonitor;
+        if (!primary) return false;
+        const [x, y] = global.get_pointer();
+        const panelHeight = this._getPanelHeight();
+        return x >= primary.x && x < primary.x + primary.width &&
+               y >= primary.y && y < primary.y + panelHeight;
+    }
+
+    _startHoverWatcher() {
+        if (this._hoverWatcherId) {
+            GLib.source_remove(this._hoverWatcherId);
+            this._hoverWatcherId = null;
+        }
+
+        this._lastHoverActivity = GLib.get_monotonic_time();
+
+        this._hoverWatcherId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 100, () => {
+            if (!this._isPanelHidden || !this._isHoverOverlay) {
+                this._hoverWatcherId = null;
+                return GLib.SOURCE_REMOVE;
+            }
+
+            const hasActiveMenu = Boolean(Main.panel?.menuManager?.activeMenu);
+            const inPanel = this._isPointerInPanel();
+
+            if (inPanel || hasActiveMenu) {
+                this._lastHoverActivity = GLib.get_monotonic_time();
+            } else {
+                const elapsedMs = (GLib.get_monotonic_time() - this._lastHoverActivity) / 1000;
+                if (elapsedMs >= 350) {
+                    this._hoverWatcherId = null;
+                    this._hideHoverOverlay();
+                    return GLib.SOURCE_REMOVE;
+                }
+            }
+
+            return GLib.SOURCE_CONTINUE;
+        });
     }
 
     _showHoverOverlay() {
+        if (!this._panelBox || this._isHoverOverlay) return;
         this._isHoverOverlay = true;
+        this._edgeActor?.hide();
         this._panelBox.show();
         this._panelBox.opacity = 255;
         this._panelBox.remove_all_transitions();
@@ -663,10 +717,19 @@ export default class ToggleTopBarImpl {
             duration: 180,
             mode: Clutter.AnimationMode.EASE_OUT_QUAD,
         });
+
+        this._startHoverWatcher();
     }
 
     _hideHoverOverlay() {
+        if (!this._isHoverOverlay) return;
         this._isHoverOverlay = false;
+
+        if (this._hoverWatcherId) {
+            GLib.source_remove(this._hoverWatcherId);
+            this._hoverWatcherId = null;
+        }
+
         const panelHeight = this._getPanelHeight();
         this._panelBox.remove_all_transitions();
         this._panelBox.ease({
@@ -676,6 +739,7 @@ export default class ToggleTopBarImpl {
             onComplete: () => {
                 if (this._isPanelHidden && !this._isHoverOverlay) {
                     this._panelBox.hide();
+                    this._edgeActor?.show();
                 }
             },
         });
@@ -689,6 +753,10 @@ export default class ToggleTopBarImpl {
         if (this._restoreTimeoutId) {
             GLib.source_remove(this._restoreTimeoutId);
             this._restoreTimeoutId = null;
+        }
+        if (this._hoverWatcherId) {
+            GLib.source_remove(this._hoverWatcherId);
+            this._hoverWatcherId = null;
         }
         if (this._edgeActor) {
             Main.layoutManager.removeChrome(this._edgeActor);
